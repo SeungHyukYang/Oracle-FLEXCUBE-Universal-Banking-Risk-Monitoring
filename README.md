@@ -121,6 +121,129 @@ This ensures the Trust Score remains:
 - Explainable
 
 ---
+## Data Source & Ingestion
+
+This project retrieves vulnerability data directly from the **National Vulnerability Database (NVD)** using the official NVD REST API (CVE API v2.0).
+
+- **Source**: National Institute of Standards and Technology (NIST) – NVD
+- **Data Type**: Publicly disclosed CVE (Common Vulnerabilities and Exposures)
+- **Access Method**: Direct API query (no local database persistence)
+
+### API Endpoint
+https://services.nvd.nist.gov/rest/json/cves/2.0
+
+
+### Query Strategy
+- Data is queried dynamically using a **rolling 30-day window**
+- Only **HIGH severity (CVSS v3.x)** vulnerabilities are retrieved
+- API parameters are generated at refresh time to ensure freshness
+
+Example parameters:
+- `pubStartDate` / `pubEndDate` (last 30 days, UTC)
+- `cvssV3Severity = HIGH`
+- `resultsPerPage = 200`
+
+This approach ensures that dashboards always reflect the most recent external risk disclosures without maintaining a local data store.
+
+---
+
+## Risk Index Methodology
+
+Each CVE is transformed into a quantitative **Risk Index** to enable aggregation and trend analysis.
+
+### Risk Index Components
+
+1. **Severity**
+   - CVSS Base Score (v3.1 preferred, fallback to v3.0)
+
+2. **Risk State**
+   - `Open`: No vendor advisory detected
+   - `Mitigated`: Vendor advisory exists  
+   - State Weights:
+     - Open = 1.0
+     - Mitigated = 0.5
+
+3. **Time Exposure**
+   - Days since public disclosure
+   - Time Weights:
+     - ≤ 30 days → 1.0
+     - 31–90 days → 1.2
+     - > 90 days → 1.5
+
+### Risk Index Formula
+
+Risk Index = CVSS Base Score × State Weight × Time Weight
+
+
+This ensures that:
+- Older unresolved risks carry higher impact
+- Mitigated risks reduce overall exposure
+- Closed risks can be excluded from calculations
+
+---
+
+## Daily Trust Score Framework
+
+### Trust Score Definition
+
+> **Trust Score represents customer confidence based on exposure to publicly disclosed external risks and the organization’s ability to manage them over time.**
+
+Trust Scores are **not indicators of confirmed breaches or incidents**, but a communication and governance metric.
+
+---
+
+### Daily Aggregation
+
+Risk exposure is aggregated **by disclosure date**:
+
+Daily Risk Index = Σ (Risk Index per CVE on that date)
+
+
+---
+
+### Trust Penalty & Scaling
+
+To prevent Trust Scores from collapsing to zero during high-volume disclosure days, an **automatic scaling mechanism** is applied.
+
+- The maximum daily risk within the window is used to calibrate sensitivity
+- The worst day is capped at a predefined penalty threshold (e.g., 70)
+
+Scale Factor = Target Penalty / Max(Daily Risk Index)
+Trust Penalty = Daily Risk Index × Scale Factor
+Trust Score = 100 − Trust Penalty
+
+
+This allows Trust Scores to:
+- Remain interpretable
+- Reflect relative risk intensity
+- Adapt automatically as data volume changes
+
+---
+
+## Output Metrics
+
+The daily trust dataset contains the following fields:
+
+| Column | Description | Interpretation |
+|------|------------|---------------|
+| `risk_date` | CVE disclosure date | Time axis |
+| `daily_risk_index` | Aggregated risk exposure | Higher = more risk |
+| `trust_penalty` | Scaled negative impact | Higher = worse |
+| `trust_score` | Customer trust indicator (0–100) | Higher = better |
+| `scale_factor` | Auto-calibration coefficient | Governance / audit |
+
+---
+
+## Governance & Limitations
+
+- This project uses **publicly disclosed data only**
+- No assumptions are made about exploitability or internal system exposure
+- Trust Scores are intended for **trend analysis and communication**, not operational security decisions
+
+> Trust Scores reflect external risk exposure and do not indicate confirmed security incidents, breaches, or exploitation events.
+
+---
+
 
 ## What This Project Is (and Is Not)
 
