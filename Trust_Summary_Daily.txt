@@ -1,0 +1,64 @@
+let
+    Source = Query1,
+
+    AddDate = Table.AddColumn(
+        Source,
+        "risk_date",
+        each try Date.From([published]) otherwise null,
+        type date
+    ),
+    Filtered = Table.SelectRows(AddDate, each [risk_date] <> null),
+
+    Grouped = Table.Group(
+        Filtered,
+        {"risk_date"},
+        {
+            {
+                "daily_risk_index",
+                each
+                    let
+                        vals = List.RemoveNulls([risk_index]),
+                        nums = List.Transform(vals, each try Number.From(_) otherwise null),
+                        clean = List.RemoveNulls(nums)
+                    in
+                        List.Sum(clean),
+                type number
+            }
+        }
+    ),
+
+    // ===== Auto Scaling =====
+    // Based on Max daily_risk_index, scale days penalty to become TargetPenalty
+    TargetPenalty = 70.0,
+    MaxDailyRisk = List.Max(List.RemoveNulls(Grouped[daily_risk_index])),
+    ScaleFactor =
+        if MaxDailyRisk = null or MaxDailyRisk = 0 then 0
+        else TargetPenalty / MaxDailyRisk,
+
+    AddTrustPenalty = Table.AddColumn(
+        Grouped,
+        "trust_penalty",
+        each
+            let
+                p = try Number.From([daily_risk_index]) * ScaleFactor otherwise null
+            in
+                if p = null then null
+                else if p > 100 then 100
+                else Number.Round(p, 2),
+        type number
+    ),
+
+    AddTrustScore = Table.AddColumn(
+        AddTrustPenalty,
+        "trust_score",
+        each
+            let tp = [trust_penalty]
+            in if tp = null then null else Number.Round(100 - tp, 2),
+        type number
+    ),
+
+    AddScale = Table.AddColumn(AddTrustScore, "scale_factor", each ScaleFactor, type number),
+
+    Sorted = Table.Sort(AddScale, {{"risk_date", Order.Ascending}})
+in
+    Sorted

@@ -1,0 +1,163 @@
+let
+    // =========================
+    // 0) Call NVD API + Automation recent 30 days (UTC)
+    // =========================
+    BaseUrl = "https://services.nvd.nist.gov/rest/json/cves/2.0",
+
+    NowUtc = DateTimeZone.FixedUtcNow(),
+    StartUtc = NowUtc - #duration(30, 0, 0, 0),
+
+    // NVD API ISO Text Ray (Include Z)
+    StartText = DateTimeZone.ToText(StartUtc, "yyyy-MM-ddTHH:mm:ss.fff\Z"),
+    EndText   = DateTimeZone.ToText(NowUtc,   "yyyy-MM-ddTHH:mm:ss.fff\Z"),
+
+    Params = [
+        pubStartDate = StartText,
+        pubEndDate   = EndText,
+        cvssV3Severity = "HIGH",
+        resultsPerPage = "200",
+        startIndex = "0"
+    ],
+
+    Raw = Json.Document(
+        Web.Contents(
+            BaseUrl,
+            [
+                Query = Params
+            ]
+        )
+    ),
+
+    // =========================
+    // 1) vulnerabilities Ray → Table
+    // =========================
+    Vulns = Raw[vulnerabilities],
+    Tbl = Table.FromList(Vulns, Splitter.SplitByNothing(), null, null, ExtraValues.Error),
+
+    // CVE record in vulnerabilities[i]
+    Expand = Table.ExpandRecordColumn(Tbl, "Column1", {"cve"}, {"cve"}),
+
+    // Expand fields needed from cve 
+    ExpandCve = Table.ExpandRecordColumn(
+        Expand,
+        "cve",
+        {"id", "published", "lastModified", "descriptions", "metrics", "references"},
+        {"cve_id", "published", "lastModified", "descriptions", "metrics", "references"}
+    ),
+
+    // descriptions is in Text, Extract first value 
+    Desc = Table.TransformColumns(
+        ExpandCve,
+        {{"descriptions", each try _{0}[value] otherwise null, type text}}
+    ),
+
+    // =========================
+    // STEP 1) CVSS (v3.1/v3.0) Extract
+    // =========================
+    CVSS31 = Table.AddColumn(
+        Desc,
+        "cvss31",
+        each try [metrics][cvssMetricV31]{0} otherwise null
+    ),
+
+    CVSS30 = Table.AddColumn(
+        CVSS31,
+        "cvss30",
+        each try [metrics][cvssMetricV30]{0} otherwise null
+    ),
+
+    BaseScore = Table.AddColumn(
+        CVSS30,
+        "cvss_base_score",
+        each
+            if [cvss31] <> null then try [cvss31][cvssData][baseScore] otherwise null
+            else if [cvss30] <> null then try [cvss30][cvssData][baseScore] otherwise null
+            else null,
+        type number
+    ),
+
+    Severity = Table.AddColumn(
+        BaseScore,
+        "cvss_severity",
+        each
+            if [cvss31] <> null then try [cvss31][cvssData][baseSeverity] otherwise null
+            else if [cvss30] <> null then try [cvss30][cvssData][baseSeverity] otherwise null
+            else null,
+        type text
+    ),
+
+    // =========================
+    // STEP 2) Risk State + state_weight
+    // - when "Vendor Advisory" at references.tags -> Mitigated
+    // - If not, Open
+    // =========================
+    HasVendorAdvisory = Table.AddColumn(
+        Severity,
+        "has_vendor_advisory",
+        each
+            let
+                refs = [references],
+                tags =
+                    if refs = null then {}
+                    else List.Combine(
+                        List.Transform(refs, each try _[tags] otherwise {})
+                    )
+            in
+                List.Contains(tags, "Vendor Advisory"),
+        type logical
+    ),
+
+    RiskState = Table.AddColumn(
+        HasVendorAdvisory,
+        "risk_state",
+        each if [has_vendor_advisory] then "Mitigated" else "Open",
+        type text
+    ),
+
+    StateWeight = Table.AddColumn(
+        RiskState,
+        "state_weight",
+        each if [risk_state] = "Open" then 1.0 else 0.5,
+        type number
+    ),
+
+    // =========================
+    // STEP 3) days_exposed + time_weight + risk_index
+    // =========================
+    PublishedDT = Table.TransformColumns(
+        StateWeight,
+        {{"published", each try DateTimeZone.From(_) otherwise null, type datetimezone}}
+    ),
+
+    DaysExposed = Table.AddColumn(
+        PublishedDT,
+        "days_exposed",
+        each if [published] = null then null else Duration.Days(DateTimeZone.FixedUtcNow() - [published]),
+        Int64.Type
+    ),
+
+    TimeWeight = Table.AddColumn(
+        DaysExposed,
+        "time_weight",
+        each
+            if [days_exposed] = null then null
+            else if [days_exposed] <= 30 then 1.0
+            else if [days_exposed] <= 90 then 1.2
+            else 1.5,
+        type number
+    ),
+
+    RiskIndex = Table.AddColumn(
+        TimeWeight,
+        "risk_index",
+        each
+            if [cvss_base_score] = null or [state_weight] = null or [time_weight] = null then null
+            else Number.Round([cvss_base_score] * [state_weight] * [time_weight], 2),
+        type number
+    ),
+
+    // =========================
+    // =========================
+    Final = Table.RemoveColumns(RiskIndex, {"cvss31", "cvss30"})
+in
+    Final
